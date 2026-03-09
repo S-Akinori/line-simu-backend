@@ -11,6 +11,7 @@ async def init_db_pool() -> None:
         dsn=settings.database_url,
         min_size=2,
         max_size=10,
+        ssl="require",
     )
 
 
