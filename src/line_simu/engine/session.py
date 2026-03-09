@@ -71,7 +71,7 @@ async def start_session(
 
     await update_session_route_and_question(session.id, route.id, first_question.id)
     api = get_messaging_api(channel.channel_access_token)
-    await _send_all(api, line_user_id, [await _build_question_message(first_question)], reply_token)
+    await _send_all(api, line_user_id, await _build_question_message(first_question), reply_token)
 
 
 async def restart_session(
@@ -104,7 +104,7 @@ async def restart_session(
 
     await update_session_route_and_question(session.id, route_id, first_question.id)
     api = get_messaging_api(channel.channel_access_token)
-    await _send_all(api, line_user_id, [await _build_question_message(first_question)], reply_token)
+    await _send_all(api, line_user_id, await _build_question_message(first_question), reply_token)
 
 
 async def process_answer(
@@ -135,10 +135,9 @@ async def process_answer(
     if current_question.question_type == "free_text" and current_question.validation:
         error_msg = _validate_free_text(answer_value, current_question.validation)
         if error_msg:
-            question_msg = await _build_question_message(current_question)
             await _send_all(
                 api, line_user_id,
-                [build_text_message(error_msg), question_msg],
+                [build_text_message(error_msg), *await _build_question_message(current_question)],
                 reply_token,
             )
             return
@@ -147,10 +146,9 @@ async def process_answer(
     if current_question.question_type in ("image_carousel", "button"):
         selected_option = await get_option_by_value(current_question.id, answer_value)
         if selected_option and selected_option.error_message:
-            question_msg = await _build_question_message(current_question)
             await _send_all(
                 api, line_user_id,
-                [build_text_message(selected_option.error_message), question_msg],
+                [build_text_message(selected_option.error_message), *await _build_question_message(current_question)],
                 reply_token,
             )
             return
@@ -175,22 +173,31 @@ async def process_answer(
     if next_result is None:
         # No more questions → determine which configs to show first,
         # then calculate only the formulas those templates reference.
+        # Pre-load session answers once; reused by config filtering and calculations.
+        session_answers = await get_session_answers_by_key(session.id)
 
         # Route-triggered result (highest priority)
         active_configs: list = []
         if session.current_route_id:
             route_configs = await get_configs_triggered_by_route(session.current_route_id)
-            route_configs = await _filter_configs_by_condition(route_configs, session.id)
+            route_configs = await _filter_configs_by_condition(route_configs, session.id, session_answers)
             active_configs = route_configs
 
         # End-of-flow result (fallback)
         if not active_configs:
             end_configs = await get_end_configs(channel.id)
-            end_configs = await _filter_configs_by_condition(end_configs, session.id)
+            end_configs = await _filter_configs_by_condition(end_configs, session.id, session_answers)
             active_configs = end_configs
 
         filter_names = _extract_formula_names(active_configs)
-        result = await run_calculations(session, channel.id, filter_names=filter_names)
+        logger.debug(
+            "Session %s end: %d active configs, filter_names=%s",
+            session.id, len(active_configs),
+            sorted(filter_names) if filter_names is not None else "ALL (no template set)",
+        )
+        # Only run calculations when there are configs to display.
+        # When active_configs is empty, no result needs to be shown.
+        result = await run_calculations(session, channel.id, filter_names=filter_names) if active_configs else {}
         await complete_session(session.id, result)
 
         for cfg in active_configs:
@@ -198,7 +205,7 @@ async def process_answer(
                 result,
                 intro_message=cfg.intro_message,
                 closing_message=cfg.closing_message,
-                body_template=getattr(cfg, "body_template", None),
+                body_template=cfg.body_template,
             ))
 
         await _send_all(api, line_user_id, messages, reply_token)
@@ -209,19 +216,26 @@ async def process_answer(
         # Route completed → collect route-triggered result messages
         if session.current_route_id and next_route_id != session.current_route_id:
             route_configs = await get_configs_triggered_by_route(session.current_route_id)
-            route_configs = await _filter_configs_by_condition(route_configs, session.id)
+            # Pre-load session answers once; reused by config filtering and calculations.
+            session_answers = await get_session_answers_by_key(session.id)
+            route_configs = await _filter_configs_by_condition(route_configs, session.id, session_answers)
             if route_configs:
                 filter_names = _extract_formula_names(route_configs)
+                logger.debug(
+                    "Session %s route transition: %d configs, filter_names=%s",
+                    session.id, len(route_configs),
+                    sorted(filter_names) if filter_names is not None else "ALL (no template set)",
+                )
                 result = await run_calculations(session, channel.id, filter_names=filter_names)
                 for cfg in route_configs:
                     messages.extend(_build_result_messages(
                         result,
                         intro_message=cfg.intro_message,
                         closing_message=cfg.closing_message,
-                        body_template=getattr(cfg, "body_template", None),
+                        body_template=cfg.body_template,
                     ))
 
-        messages.append(await _build_question_message(next_question))
+        messages.extend(await _build_question_message(next_question))
         await update_session_route_and_question(session.id, next_route_id, next_question.id)
         await _send_all(api, line_user_id, messages, reply_token)
 
@@ -238,7 +252,7 @@ async def send_question_message(
 ) -> None:
     """Build and send a LINE message for a question."""
     api = get_messaging_api(channel.channel_access_token)
-    await _send_all(api, line_user_id, [await _build_question_message(question)], reply_token)
+    await _send_all(api, line_user_id, await _build_question_message(question), reply_token)
 
 
 async def send_result_message(
@@ -260,18 +274,18 @@ async def send_result_message(
 # Private helpers
 # ---------------------------------------------------------------------------
 
-async def _build_question_message(question: Question) -> object:
-    """Build a LINE message object for a question (without sending)."""
+async def _build_question_message(question: Question) -> list[object]:
+    """Build LINE message objects for a question (without sending)."""
     options = await get_question_options(question.id)
     option_dicts = [
         {"label": opt.label, "value": opt.value, "image_url": opt.image_url}
         for opt in options
     ]
     if question.question_type == "image_carousel" and option_dicts:
-        return build_carousel_message(option_dicts)
+        return [build_text_message(question.content), build_carousel_message(option_dicts)]
     if question.question_type == "button" and option_dicts:
-        return build_button_message(question.content, option_dicts, question.image_url)
-    return build_text_message(question.content)
+        return [build_button_message(question.content, option_dicts, question.image_url)]
+    return [build_text_message(question.content)]
 
 
 def _build_result_messages(
@@ -293,13 +307,14 @@ def _build_result_messages(
     else:
         lines = [intro_message + "\n"]
         for _name, item in result.items():
-            label = item.get("label", _name)
             if item.get("error"):
-                lines.append(f"{label}: 計算できませんでした")
-            else:
-                fmt = item.get("result_format", "{label}: {value}")
-                formatted_value = item.get("formatted", str(item.get("value", "N/A")))
-                lines.append(fmt.replace("{label}", str(label)).replace("{value}", formatted_value))
+                # Skip formulas that could not be calculated — they are likely
+                # not relevant to the current route and should not be displayed.
+                continue
+            label = item.get("label", _name)
+            fmt = item.get("result_format", "{label}: {value}")
+            formatted_value = item.get("formatted", str(item.get("value", "N/A")))
+            lines.append(fmt.replace("{label}", str(label)).replace("{value}", formatted_value))
         text = "\n".join(lines)
 
     messages = [build_text_message(text)]
@@ -308,14 +323,19 @@ def _build_result_messages(
     return messages
 
 
-async def _filter_configs_by_condition(configs: list, session_id: UUID) -> list:
+async def _filter_configs_by_condition(
+    configs: list,
+    session_id: UUID,
+    answers_by_key: dict | None = None,
+) -> list:
     """Return only configs whose condition matches the session answers (or have no condition)."""
     if not any(getattr(cfg, "condition", None) for cfg in configs):
         return configs
-    session_answers = await get_session_answers_by_key(session_id)
+    if answers_by_key is None:
+        answers_by_key = await get_session_answers_by_key(session_id)
     return [
         cfg for cfg in configs
-        if not cfg.condition or check_display_conditions(cfg.condition, session_answers)
+        if not cfg.condition or check_display_conditions(cfg.condition, answers_by_key)
     ]
 
 
@@ -356,9 +376,9 @@ def _extract_formula_names(configs: list) -> set[str] | None:
     formulas are calculated for the default full-list display.
     """
     templates = [
-        getattr(cfg, "body_template", None)
+        cfg.body_template
         for cfg in configs
-        if getattr(cfg, "body_template", None) is not None
+        if cfg.body_template is not None
     ]
     if not templates:
         return None  # no templates set → need all formulas for default display

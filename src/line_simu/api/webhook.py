@@ -26,15 +26,16 @@ async def webhook_handler(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> dict[str, str]:
-    # 1. Load channel by webhook_path
-    channel = await get_channel_by_webhook_path(channel_path)
-    if channel is None:
-        raise HTTPException(status_code=404, detail="Channel not found")
-
-    # 2. Verify LINE signature using channel-specific secret
+    # 1. Read body immediately before any async DB calls to avoid ClientDisconnect
+    # if LINE closes the connection while we're waiting for the DB.
     signature = request.headers.get("X-Line-Signature", "")
     body_bytes = await request.body()
     body_str = body_bytes.decode("utf-8")
+
+    # 2. Load channel by webhook_path
+    channel = await get_channel_by_webhook_path(channel_path)
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
 
     parser = WebhookParser(channel.channel_secret)
     try:

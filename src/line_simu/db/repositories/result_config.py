@@ -34,6 +34,8 @@ class ResultDisplayConfig:
             setattr(self, key, value)
         if not hasattr(self, "condition"):
             self.condition = None
+        if not hasattr(self, "body_template"):
+            self.body_template = None
 
 
 async def get_configs_triggered_by_question(question_id: UUID) -> list[ResultDisplayConfig]:

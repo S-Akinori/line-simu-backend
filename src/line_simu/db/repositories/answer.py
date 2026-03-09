@@ -71,6 +71,19 @@ async def get_session_answers_with_labels(session_id: UUID) -> dict[str, dict]:
     }
 
 
+async def get_session_answers_by_key_full(session_id: UUID) -> dict[str, "Answer"]:
+    """Get all answers for a session keyed by question_key, as full Answer objects."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT a.*, q.question_key
+           FROM answers a
+           JOIN questions q ON q.id = a.question_id
+           WHERE a.session_id = $1""",
+        session_id,
+    )
+    return {row["question_key"]: Answer(**dict(row)) for row in rows}
+
+
 async def get_answer_by_question_key(
     session_id: UUID,
     question_key: str,
