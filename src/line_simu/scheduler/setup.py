@@ -27,8 +27,9 @@ def init_scheduler() -> None:
 
     scheduler.add_job(
         check_registration_deliveries,
-        "interval",
-        hours=1,
+        "cron",
+        hour=3,  # 03:00 UTC = 12:00 JST
+        minute=0,
         id="check_registration_deliveries",
         replace_existing=True,
     )

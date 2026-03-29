@@ -9,7 +9,6 @@ class LineChannel:
     channel_id: str
     channel_secret: str
     channel_access_token: str
-    admin_line_group_id: str | None
     gas_webhook_url: str | None
     webhook_path: str
     start_keywords: list[str]
@@ -40,7 +39,7 @@ async def get_channel_by_webhook_path(webhook_path: str) -> LineChannel | None:
     pool = await get_pool()
     row = await pool.fetchrow(
         """SELECT id, name, channel_id, channel_secret, channel_access_token,
-                  admin_line_group_id, gas_webhook_url, webhook_path, start_keywords, is_active
+                  gas_webhook_url, webhook_path, start_keywords, is_active
            FROM line_channels
            WHERE webhook_path = $1 AND is_active = true""",
         webhook_path,
@@ -56,7 +55,7 @@ async def get_all_channels() -> list[LineChannel]:
     pool = await get_pool()
     rows = await pool.fetch(
         """SELECT id, name, channel_id, channel_secret, channel_access_token,
-                  admin_line_group_id, gas_webhook_url, webhook_path, start_keywords, is_active
+                  gas_webhook_url, webhook_path, start_keywords, is_active
            FROM line_channels
            WHERE is_active = true
            ORDER BY created_at ASC"""
