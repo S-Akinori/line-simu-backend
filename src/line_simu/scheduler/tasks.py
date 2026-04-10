@@ -114,6 +114,22 @@ async def check_registration_deliveries() -> None:
                 "channel_name": channel_name,
             }
             try:
+                # Insert first to prevent duplicate sends under concurrent execution.
+                # ON CONFLICT DO NOTHING returns "INSERT 0 0" if the row already exists.
+                insert_result = await pool.execute(
+                    """INSERT INTO step_delivery_sends (config_id, line_user_id)
+                       VALUES ($1, $2) ON CONFLICT DO NOTHING""",
+                    config_id,
+                    lu_id,
+                )
+                if insert_result == "INSERT 0 0":
+                    logger.info(
+                        "Registration delivery already sent, skipping: config=%s user=%s",
+                        config_id,
+                        line_user_id,
+                    )
+                    continue
+
                 text = render_template(message_template, variables)
                 api = get_messaging_api(channel_access_token)
                 await api.push_message(
@@ -121,12 +137,6 @@ async def check_registration_deliveries() -> None:
                         to=line_user_id,
                         messages=[build_text_message(text)],
                     )
-                )
-                await pool.execute(
-                    """INSERT INTO step_delivery_sends (config_id, line_user_id)
-                       VALUES ($1, $2) ON CONFLICT DO NOTHING""",
-                    config_id,
-                    lu_id,
                 )
                 logger.info(
                     "Registration delivery sent: config=%s user=%s",
