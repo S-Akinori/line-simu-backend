@@ -1,27 +1,23 @@
 import logging
 from uuid import UUID
 
-from linebot.v3.messaging import PushMessageRequest
-
 from line_simu.db.connection import get_pool
 from line_simu.db.repositories.answer import get_session_answers_with_labels
 from line_simu.db.repositories.channel import LineChannel
-from line_simu.line.client import get_messaging_api
-from line_simu.line.messages import build_text_message
 from line_simu.schemas.session import Session
 from line_simu.services.email import send_email
 
 logger = logging.getLogger(__name__)
 
 
-async def _get_admin_line_user_ids(channel_id: UUID) -> list[str]:
-    """Get LINE user IDs of active admin/super_admin profiles for a channel."""
+async def _get_admin_emails(channel_id: UUID) -> list[str]:
+    """Get email addresses of active super_admin / channel-assigned admin profiles."""
     pool = await get_pool()
     rows = await pool.fetch(
-        """SELECT p.line_notify_user_id
+        """SELECT p.email
            FROM profiles p
            WHERE p.is_active = true
-             AND p.line_notify_user_id IS NOT NULL
+             AND p.email IS NOT NULL
              AND (
                p.role = 'super_admin'
                OR (
@@ -34,7 +30,7 @@ async def _get_admin_line_user_ids(channel_id: UUID) -> list[str]:
              )""",
         channel_id,
     )
-    return [row["line_notify_user_id"] for row in rows]
+    return [row["email"] for row in rows]
 
 
 async def notify_admin_completion(
@@ -78,7 +74,7 @@ async def notify_admin_completion(
                     session.id,
                 )
 
-        # 2. Admin LINE push
+        # 2. Admin emails (super_admin + channel-assigned admins)
         admin_parts = [
             f"[シミュレーション完了] {channel.name}",
             f"セッションID: {session.id}",
@@ -88,22 +84,27 @@ async def notify_admin_completion(
         admin_parts.append("計算結果:\n" + "\n".join(result_lines))
         admin_text = "\n".join(admin_parts)
 
-        await _push_admin_message(admin_text, channel)
-
-        # 3. Admin email
-        try:
-            await send_email(
-                subject=f"[LINE Simu] シミュレーション完了 - {channel.name}",
-                body=admin_text,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to send admin email for session %s channel %s",
-                session.id,
+        admin_emails = await _get_admin_emails(channel.id)
+        if not admin_emails:
+            logger.warning(
+                "No admin emails configured for channel %s, skipping admin notification",
                 channel.name,
             )
+        for admin_email in admin_emails:
+            try:
+                await send_email(
+                    subject=f"[LINE Simu] シミュレーション完了 - {channel.name}",
+                    body=admin_text,
+                    to=admin_email,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send admin email to %s for session %s",
+                    admin_email,
+                    session.id,
+                )
 
-        # 4. Persist notification record
+        # 3. Persist notification record
         await save_notification_record(
             str(session.id), "session_completed", line_user_id=session.line_user_id
         )
@@ -123,16 +124,25 @@ async def notify_admin_abandonment(session: Session, channel: LineChannel) -> No
             f"セッションID: {session.id}\n"
             f"リマインダー送信回数: {session.reminder_count}"
         )
-        await _push_admin_message(text, channel)
-        try:
-            await send_email(
-                subject=f"[LINE Simu] セッション放棄 - {channel.name}",
-                body=text,
+        admin_emails = await _get_admin_emails(channel.id)
+        if not admin_emails:
+            logger.warning(
+                "No admin emails configured for channel %s, skipping admin notification",
+                channel.name,
             )
-        except Exception:
-            logger.exception(
-                "Failed to send admin email for abandoned session %s", session.id
-            )
+        for admin_email in admin_emails:
+            try:
+                await send_email(
+                    subject=f"[LINE Simu] セッション放棄 - {channel.name}",
+                    body=text,
+                    to=admin_email,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send admin email to %s for abandoned session %s",
+                    admin_email,
+                    session.id,
+                )
         await save_notification_record(
             str(session.id), "session_abandoned", line_user_id=session.line_user_id
         )
@@ -158,30 +168,3 @@ async def save_notification_record(
         notification_type,
         line_user_id,
     )
-
-
-async def _push_admin_message(text: str, channel: LineChannel) -> None:
-    """Push a notification to all admin LINE users configured for this channel."""
-    user_ids = await _get_admin_line_user_ids(channel.id)
-    if not user_ids:
-        logger.warning(
-            "No admin LINE user IDs configured for channel %s, skipping",
-            channel.name,
-        )
-        return
-
-    api = get_messaging_api(channel.channel_access_token)
-    for line_user_id in user_ids:
-        try:
-            await api.push_message(
-                PushMessageRequest(
-                    to=line_user_id,
-                    messages=[build_text_message(text)],
-                )
-            )
-        except Exception:
-            logger.exception(
-                "Failed to send admin notification to %s for channel %s",
-                line_user_id,
-                channel.name,
-            )
