@@ -24,11 +24,13 @@ def _send_smtp(subject: str, body: str, to: str) -> None:
         smtp.sendmail(from_addr, [to], msg.as_string())
 
 
-async def send_email(subject: str, body: str) -> None:
-    """Send an email to admin_email. No-op if SMTP is not configured."""
-    if not settings.smtp_host or not settings.admin_email:
+async def send_email(subject: str, body: str, to: str | None = None) -> None:
+    """Send an email. If `to` is omitted, sends to admin_email.
+
+    No-op if SMTP is not configured or no recipient is available.
+    Raises on SMTP error so callers can handle user-vs-admin send independently.
+    """
+    recipient = to or settings.admin_email
+    if not settings.smtp_host or not recipient:
         return
-    try:
-        await asyncio.to_thread(_send_smtp, subject, body, settings.admin_email)
-    except Exception:
-        logger.exception("Failed to send email notification")
+    await asyncio.to_thread(_send_smtp, subject, body, recipient)

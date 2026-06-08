@@ -3,13 +3,12 @@ import logging
 from linebot.v3.messaging import PushMessageRequest
 
 from line_simu.db.connection import get_pool
+from line_simu.db.repositories.channel import LineChannel
 from line_simu.db.repositories.session import abandon_session
 from line_simu.line.client import get_messaging_api
 from line_simu.line.messages import build_text_message
-from line_simu.services.notification import (
-    notify_admin_abandonment,
-    save_notification_record,
-)
+from line_simu.schemas.session import Session
+from line_simu.services.notification import notify_admin_abandonment
 from line_simu.services.template import render_template
 
 logger = logging.getLogger(__name__)
@@ -21,20 +20,20 @@ MAX_REMINDER_COUNT = 2
 async def send_reminder_message(
     line_user_id: str,
     session_id: str,
+    channel_access_token: str,
     message_template: str,
     variables: dict[str, str] | None = None,
 ) -> None:
     """Send a reminder message to a LINE user."""
     try:
         text = render_template(message_template, variables or {})
-        api = get_messaging_api()
+        api = get_messaging_api(channel_access_token)
         await api.push_message(
             PushMessageRequest(
                 to=line_user_id,
                 messages=[build_text_message(text)],
             )
         )
-        # Update reminder tracking
         pool = await get_pool()
         await pool.execute(
             """UPDATE sessions
@@ -50,19 +49,6 @@ async def send_reminder_message(
             "Failed to send reminder to %s for session %s",
             line_user_id,
             session_id,
-        )
-
-
-async def send_admin_notification(
-    session_id: str,
-    notification_type: str,
-) -> None:
-    """Send an admin notification about a session event."""
-    try:
-        await save_notification_record(session_id, notification_type)
-    except Exception:
-        logger.exception(
-            "Failed to save admin notification for session %s", session_id
         )
 
 
@@ -155,12 +141,14 @@ async def check_inactive_sessions() -> None:
     """Check for sessions that have been inactive and send reminders or abandon."""
     pool = await get_pool()
 
-    # Find in-progress sessions inactive for threshold hours
     rows = await pool.fetch(
         f"""SELECT s.id, s.line_user_id AS line_user_uuid, s.reminder_count,
-                   lu.line_user_id
+                   s.status, s.started_at, s.created_at, s.updated_at,
+                   lu.line_user_id,
+                   lc.id AS lc_id, lc.name AS lc_name, lc.channel_access_token
             FROM sessions s
             JOIN line_users lu ON lu.id = s.line_user_id
+            JOIN line_channels lc ON lc.id = lu.line_channel_id
             WHERE s.status = 'in_progress'
               AND lu.is_following = true
               AND s.updated_at < now() - interval '{INACTIVITY_THRESHOLD_HOURS} hours'
@@ -171,18 +159,34 @@ async def check_inactive_sessions() -> None:
         session_id = str(row["id"])
         line_user_id = row["line_user_id"]
         reminder_count = row["reminder_count"]
+        channel_access_token = row["channel_access_token"]
 
         if reminder_count >= MAX_REMINDER_COUNT:
-            # Abandon session after max reminders
             await abandon_session(row["id"])
-            from line_simu.schemas.session import Session
 
-            await send_admin_notification(session_id, "session_abandoned")
+            session = Session(
+                id=row["id"],
+                line_user_id=row["line_user_uuid"],
+                status="abandoned",
+                reminder_count=reminder_count,
+                started_at=row["started_at"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            channel = LineChannel(
+                id=row["lc_id"],
+                name=row["lc_name"],
+                channel_access_token=channel_access_token,
+                channel_id="", channel_secret="", gas_webhook_url=None,
+                webhook_path="", start_keywords=[], is_active=True,
+                start_keyword_routes={},
+            )
+            await notify_admin_abandonment(session, channel)
             logger.info("Session %s abandoned after %d reminders", session_id, reminder_count)
         else:
-            # Send reminder
             await send_reminder_message(
                 line_user_id,
                 session_id,
+                channel_access_token,
                 "回答がまだ完了していません。続きはこちらから回答できます。",
             )
