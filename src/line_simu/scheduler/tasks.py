@@ -14,7 +14,6 @@ from line_simu.services.template import render_template
 logger = logging.getLogger(__name__)
 
 INACTIVITY_THRESHOLD_HOURS = 48
-MAX_REMINDER_COUNT = 2
 
 
 async def send_reminder_message(
@@ -157,36 +156,27 @@ async def check_inactive_sessions() -> None:
 
     for row in rows:
         session_id = str(row["id"])
-        line_user_id = row["line_user_id"]
         reminder_count = row["reminder_count"]
         channel_access_token = row["channel_access_token"]
 
-        if reminder_count >= MAX_REMINDER_COUNT:
-            await abandon_session(row["id"])
+        await abandon_session(row["id"])
 
-            session = Session(
-                id=row["id"],
-                line_user_id=row["line_user_uuid"],
-                status="abandoned",
-                reminder_count=reminder_count,
-                started_at=row["started_at"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
-            channel = LineChannel(
-                id=row["lc_id"],
-                name=row["lc_name"],
-                channel_access_token=channel_access_token,
-                channel_id="", channel_secret="", gas_webhook_url=None,
-                webhook_path="", start_keywords=[], is_active=True,
-                start_keyword_routes={},
-            )
-            await notify_admin_abandonment(session, channel)
-            logger.info("Session %s abandoned after %d reminders", session_id, reminder_count)
-        else:
-            await send_reminder_message(
-                line_user_id,
-                session_id,
-                channel_access_token,
-                "回答がまだ完了していません。続きはこちらから回答できます。",
-            )
+        session = Session(
+            id=row["id"],
+            line_user_id=row["line_user_uuid"],
+            status="abandoned",
+            reminder_count=reminder_count,
+            started_at=row["started_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+        channel = LineChannel(
+            id=row["lc_id"],
+            name=row["lc_name"],
+            channel_access_token=channel_access_token,
+            channel_id="", channel_secret="", gas_webhook_url=None,
+            webhook_path="", start_keywords=[], is_active=True,
+            start_keyword_routes={},
+        )
+        await notify_admin_abandonment(session, channel)
+        logger.info("Session %s abandoned after %s hours of inactivity", session_id, INACTIVITY_THRESHOLD_HOURS)
