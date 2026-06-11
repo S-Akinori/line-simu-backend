@@ -33,35 +33,51 @@ async def _get_admin_emails(channel_id: UUID) -> list[str]:
     return [row["email"] for row in rows]
 
 
+def _build_answer_lines(answers: dict[str, dict]) -> list[str]:
+    return [
+        f"  {item['label']}: {item['value']}"
+        for item in answers.values()
+        if item.get("label") and item.get("value") is not None
+    ]
+
+
+def _build_result_lines(result: dict) -> list[str]:
+    lines = []
+    for _name, item in result.items():
+        label = item.get("label", _name)
+        if item.get("error"):
+            lines.append(f"  {label}: エラー")
+        else:
+            lines.append(f"  {label}: {item.get('formatted', item.get('value', 'N/A'))}")
+    return lines
+
+
+_SEP = "─" * 40
+
+
 async def notify_admin_completion(
     session: Session, result: dict, channel: LineChannel
 ) -> None:
     """Notify admins (and optionally the user) when a simulation is completed."""
     try:
         answers = await get_session_answers_with_labels(session.id)
-        answer_lines = [
-            f"  {item['label']}: {item['value']}"
-            for item in answers.values()
-        ]
-
-        result_lines = []
-        for _name, item in result.items():
-            label = item.get("label", _name)
-            if item.get("error"):
-                result_lines.append(f"  {label}: エラー")
-            else:
-                result_lines.append(
-                    f"  {label}: {item.get('formatted', item.get('value', 'N/A'))}"
-                )
+        answer_lines = _build_answer_lines(answers)
+        result_lines = _build_result_lines(result)
 
         # 1. User email — independent step; failure does not block admin notification
         user_email = (answers.get("email") or {}).get("value")
         if user_email:
             try:
-                user_body = f"シミュレーション結果をお知らせします。\n\n" + "\n".join(result_lines)
+                user_parts = [
+                    f"【{channel.name}】シミュレーション結果",
+                    _SEP,
+                ]
+                if answer_lines:
+                    user_parts += ["■ ご回答内容", *answer_lines, ""]
+                user_parts += ["■ 計算結果", *result_lines]
                 await send_email(
                     subject=f"【{channel.name}】シミュレーション結果",
-                    body=user_body,
+                    body="\n".join(user_parts),
                     to=user_email,
                 )
                 logger.info(
@@ -76,12 +92,13 @@ async def notify_admin_completion(
 
         # 2. Admin emails (super_admin + channel-assigned admins)
         admin_parts = [
-            f"[シミュレーション完了] {channel.name}",
-            f"セッションID: {session.id}",
+            f"■ チャンネル: {channel.name}",
+            f"■ セッションID: {session.id}",
+            _SEP,
         ]
         if answer_lines:
-            admin_parts.append("回答内容:\n" + "\n".join(answer_lines))
-        admin_parts.append("計算結果:\n" + "\n".join(result_lines))
+            admin_parts += ["【回答内容】", *answer_lines, ""]
+        admin_parts += ["【計算結果】", *result_lines]
         admin_text = "\n".join(admin_parts)
 
         admin_emails = await _get_admin_emails(channel.id)
@@ -111,44 +128,6 @@ async def notify_admin_completion(
     except Exception:
         logger.exception(
             "notify_admin_completion failed for session %s channel %s",
-            session.id,
-            channel.name,
-        )
-
-
-async def notify_admin_abandonment(session: Session, channel: LineChannel) -> None:
-    """Notify admins when a session is abandoned."""
-    try:
-        text = (
-            f"[セッション放棄] {channel.name}\n"
-            f"セッションID: {session.id}\n"
-            f"リマインダー送信回数: {session.reminder_count}"
-        )
-        admin_emails = await _get_admin_emails(channel.id)
-        if not admin_emails:
-            logger.warning(
-                "No admin emails configured for channel %s, skipping admin notification",
-                channel.name,
-            )
-        for admin_email in admin_emails:
-            try:
-                await send_email(
-                    subject=f"[LINE Simu] セッション放棄 - {channel.name}",
-                    body=text,
-                    to=admin_email,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to send admin email to %s for abandoned session %s",
-                    admin_email,
-                    session.id,
-                )
-        await save_notification_record(
-            str(session.id), "session_abandoned", line_user_id=session.line_user_id
-        )
-    except Exception:
-        logger.exception(
-            "notify_admin_abandonment failed for session %s channel %s",
             session.id,
             channel.name,
         )

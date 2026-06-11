@@ -20,6 +20,7 @@ class Question(BaseModel):
     question_key: str
     question_type: str
     content: str
+    title: str | None = None
     description: str | None = None
     sort_order: int = 0
     group_name: str | None = None

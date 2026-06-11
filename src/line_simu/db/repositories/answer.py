@@ -56,7 +56,7 @@ async def get_session_answers_with_labels(session_id: UUID) -> dict[str, dict]:
     pool = await get_pool()
     rows = await pool.fetch(
         """SELECT q.question_key,
-                  q.content AS question_label,
+                  COALESCE(q.title, q.content) AS question_label,
                   COALESCE(qo.label, a.answer_value) AS display_value
            FROM answers a
            JOIN questions q ON q.id = a.question_id
